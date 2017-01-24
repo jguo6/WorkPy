@@ -2,27 +2,24 @@ import pandas as pd
 from sqlalchemy import create_engine
 from pycake import DataMap, SQLManager
  
-def _sql_connect(user, password, db):
-    sqlm = SQLManager()
-    sqlm.init(user, password, db)
-    return sqlm.engine
-def connect(user, password, db, is_postgres=False):
-    host = 'localhost'
-    if is_postgres:
-        conn_str = 'postgresql://%s:%s@:5432/%s' % (user, password, host, db)
-        engine = create_engine(conn_str, pool_size=5, pool_recycle=10)
-    else:
-        engine=_sql_connect(user, password, db)
+def connect_to_sql(host, usr, pwd, db):
+    conn_str = 'mssql+pymssql://%s:%s@%s/%s' % (usr, pwd, host, db)
+    engine = create_engine(conn_str, pool_size=5, pool_recycle=10)
     return engine
- 
-## params
+
+## Login Credentials
+host = 'PVWCHI6PSQL1'
+db = 'StockGroup' 
+
+# Service Account Auth
+#user = 'sparky1'
+#pwd = 'Sp@rk_users'
+
+# Windows Auth
 user = ''
-pwd = ''
-db = 'companies'
-map_name = 'DM_FairMoveReturns_May16'
- 
+pwd  = ''
 ## connect to sql
-engine = connect(user,pwd, db)
+engine = connect_to_sql(host, user, pwd, db) 
  
 ## get data
 query = """
@@ -92,10 +89,14 @@ Order By CE.symbol
  """
  
 df = pd.read_sql(query, engine)
-df.set_index('Account', inplace=True)
-df.dtypes 
+# Increment index by 1
+df.index += 1
+# Need this?
+#df.set_index('Account', inplace=True)
+#df.dtypes 
 
 ## write data
+map_name = 'DM_GJI_FairMoveReturns_May16'
 data_map = DataMap(map_name, True, True)
 data_map.notify(data=df)
 data_map.close()
