@@ -4,7 +4,7 @@ import pyodbc
 from datetime import date
 from scipy import stats 
 import statsmodels.api as sm
-import matplotlib.pyplot as pltI
+import matplotlib.pyplot as plt
 import smtplib
 from pyspark import pyspark as ps
 from email.mime.multipart import MIMEMultipart
@@ -12,15 +12,20 @@ from email.mime.text import MIMEText
 from email.MIMEBase import MIMEBase
 from email import Encoders
 import datetime
+from sqlalchemy import create_engine
+import pymmd 
 
 c = pymmd.MMDConnection('pvlchi6ppymmd1', 9999) #connection string to the prints widget 
 r = c.call('auth.auto', {'user':'jguo'}) 
-
-
-def sample():
-    connstr = 'DRIVER={SQL Server Native Client 11.0}; SERVER=pvwchi6psql1; Database=master; Trusted_Connection=yes'
-    connection = pyodbc.connect(connstr)
+            
+sql1_host = 'PVWCHI6PSQL1'
+sql1_user = 'TSPython'
+sql1_pwd = 'W!nt3r2015'
+db = 'CMSandbox'
     
+def sample():
+    engine = connect_to_sql(sql1_host, sql1_user, sql1_pwd, db) 
+
     query = """
     SELECT CAST(convert(date, x.LastUpdated, 103) as datetime) as dt
     ,x.UnderlyingSymbol as Symbol 
@@ -44,7 +49,7 @@ def sample():
       then x.Account else LEFT(x.Account, CHARINDEX('.', x.Account) - 1) END), name, SectorName, DaysToExp
     order by x.LastUpdated desc
     """
-    frame = psql.read_sql(query, connection)[['dt', 'Symbol', 'Liq_Rank', 'Gamma_C', 'ThetaCNew', \
+    frame = psql.read_sql(query, engine)[['dt', 'Symbol', 'Liq_Rank', 'Gamma_C', 'ThetaCNew', \
                                              'Vega', 'Initials', 'Name', 'SectorName', 'Exp']]
     frame.rename(columns = {'dt': 'TradeDate',
                             'Symbol' : 'Symbol',
@@ -64,8 +69,47 @@ def sample():
     frame['TWVega'] = frame['TWVega'].shift(1)
     frame.reset_index(drop=True, inplace=True)
     return frame 
+    #how would I do it 
     
-
+def firms():
+    engine = connect_to_sql(sql1_host, sql1_user, sql1_pwd, db)  
+    query = """
+	with traders as (select * 
+		from [trades].[dbo].[tblTraders] where stopDate is null and trader = 1),
+	fullTable as (
+		select x.name, o.*
+		from [positions].[dbo].[tblPnLPositionHistory_NG] o
+		left join traders x on o.traderID = x.TraderID
+		where thetaCNew is not null and name not like 'Seven%')
+    SELECT CAST(convert(date, x.LastUpdated, 103) as datetime) as dt
+    ,x.UnderlyingSymbol as Symbol 
+    ,SUM(x.ImpliedGammaC) as Gamma_C
+    ,SUM(x.ThetaCNew) as ThetaCNew
+    ,sum( x.ImpliedVolTimeWeightedVega * 100) as Vega
+    ,(CASE WHEN CHARINDEX('.', x.Account) = 0 
+      then x.Account else LEFT(x.Account, CHARINDEX('.', x.Account) - 1) END) as Initials
+    from fullTable x
+    left join companies.dbo.tblStockBeta b on b.StockSymbol = x.UnderlyingSymbol and (b.ProcessDate = CAST(convert(date, x.LastUpdated, 103) as datetime))
+    where (x.thetaCNew is not null) and x.SecurityType != 'S' and x.type = 'P' and x.account != 'JAB' 
+    group by x.LastUpdated, x.UnderlyingSymbol, (CASE WHEN CHARINDEX('.', x.Account) = 0 
+      then x.Account else LEFT(x.Account, CHARINDEX('.', x.Account) - 1) END)
+    order by x.LastUpdated desc
+    """
+    frame = psql.read_sql(query, engine)[['dt', 'Symbol', 'Gamma_C', 'ThetaCNew', \
+                                             'Vega']]
+    frame.rename(columns = {'dt': 'TradeDate',
+                            'Symbol' : 'Symbol',
+                            'Gamma_C' : 'Gamma_C',
+                            'ThetaCNew' : 'Theta_C_New',
+                            'Vega': 'TWVega'}, inplace=True)
+    frame['Symbol'] = frame['Symbol'].str.strip()  
+    frame.drop_duplicates(['TradeDate', 'Symbol', 'Gamma_C', 'Theta_C_New', \
+                        'TWVega'], inplace=True) 
+    frame.reset_index(drop=True, inplace=True)
+    return frame 
+    
+    
+    
 def pull_spy():
     
     connstr = 'DRIVER={SQL Server Native Client 11.0}; SERVER=pvwchi6psql1; Database=master; Trusted_Connection=yes'
@@ -88,7 +132,6 @@ def pull_spy():
 
 
 def k(x, x_grid, band, spy, fran, vg, gp):
-
     kde = sm.nonparametric.KDEMultivariateConditional(endog = x, exog = x_grid, dep_type='c', indep_type='c', bw=[band, band])  
     endog = np.arange(-2.0, 2.0, 0.01)  
     ys = kde.pdf(exog_predict=[spy]*len(endog), endog_predict=endog)
@@ -105,7 +148,9 @@ def k(x, x_grid, band, spy, fran, vg, gp):
     med_val = endog[med_idx]
     idx_75 = np.abs(perc_ys - 0.75).argmin()
     val_75 = endog[idx_75]
-    
+
+#    plt.figure(8).suptitle('FIRM', fontsize=12, fontweight='bold')
+#    plt.plot(endog, ys, color='k', linewidth=1.0)
 #    print 'Group: %s' % gp 
 #    print 'Franchise: %s' % fran
 #    print 'Expected franchise: %s' % (mean_val * vg)
@@ -113,7 +158,7 @@ def k(x, x_grid, band, spy, fran, vg, gp):
 #    print '25th percentile: %s' % (val_25 * vg)
 #    print '50th percentile: %s' % (med_val * vg)
 #    print '75th percentile: %s \n \n' % (val_75 * vg)
-#    
+    
     msg = 'Group: {} \n Franchise: {:,.2f} \n Expected Franchise: {:,.2f} \n 1 SD: {:,.2f} \
         \n 25th percentile: {:,.2f} \n 50th percentile: {:,.2f} \n 75th percentile: {:,.2f} \n \n'.format(gp, float(fran), float(mean_val * vg), \
             float(sd * vg), float(val_25 * vg), float(med_val * vg), float(val_75 * vg))
@@ -124,14 +169,14 @@ def k(x, x_grid, band, spy, fran, vg, gp):
 
 def pull_data():
     leaps = ['Chad Evans', 'Brian Muller', 'Marc Rothman', 'Ryo Saotome', 'Andy Grigus', \
-            'Nic ' + "O'" + 'Connor', 'Stephen Landefeld', 'Ali Amjad', 'LEAPs']
+            'Nic ' + "O'" + 'Connor', 'Stephen Landefeld', 'Ali Amjad', 'LEAPs'] 
     leaps_2 = ['FSF', 'FA2', 'FG2', 'FBR', 'FBS', 'FC1', 'FRM', 'FWS', 'FRO', 'LPS']
     
     msc = ['JAB']
     
     convexity = ['Tom Simpson', 'Neel Shah', 'Steve Lockwood', 'Roxy Rong', 'Matt MacFarlane', 'Convexity' ] 
     convexity_2 = ['FMC', 'FN1', 'FN2', 'FN3', 'FN6', 'FNS', 'FRK', 'FT1', 'FT2', 'FT3', 'FTS', 'FSL', 'CVX']
-                
+                 
     cat = ['FK2', 'AKA', 'CAT']
                 
     sector_1 = ['Communications', 'Technology', 'Energy', 'Industrials', 'Materials']
@@ -144,7 +189,6 @@ def pull_data():
   
     #all trade pnl, joined on trader name and ID as well as sectorName for each symbol   
     trades = sample()  
-    
     #leaps, convexity group, catalyst group      
     lp = trades.loc[(trades['Name'].isin(leaps) | trades['Account'].isin(leaps_2)) & (trades['Exp'] > 200)]  
     cvx = trades.loc[(trades['Name'].isin(convexity) | trades['Account'].isin(convexity_2)) & (trades['Exp'] <= 270)] 
@@ -159,7 +203,7 @@ def pull_data():
         (trades['Liq'] <= 750) & ((trades['Name'].isin(leaps + convexity) == False) & \
         (trades['Account'].isin(leaps_2 + convexity_2 + cat + msc + sc1 + liq + illiq) == False))]
 
-
+    
     l1 = trades.loc[(trades['Liq'] <= 125) & ((trades['Name'].isin(leaps + convexity) == False) | \
         (trades['Account'].isin(leaps_2 + convexity_2 + cat + illiq + msc + sc1 + sc2) == False)) \
         & (trades['Exp'] <= 270) & (trades['Sector'].isin(sector_1 + sector_2) == False)]
@@ -232,9 +276,27 @@ def pull_data():
     l2 = l2.merge(spy, on=['TradeDate'], how='left')
     l2['ROV'] = (l2['Gamma_C'] + l2['Theta_C_New']) / l2['TWVega'] 
     
-    return leaps, cvx, catalyst, s1, s2, l1, l2
+    firm = firms() 
+    
+    #goes over grouping it by day and then shifting the TimeVolWeightedVega 
+    firm = firm.groupby(['TradeDate', 'Symbol'], as_index=False).sum()
+    firm.reset_index() 
+    firm['TWVega'] = firm['TWVega'].abs()
+    firm = firm.groupby('TradeDate', as_index=False).sum()
+    firm.reset_index() 
+    firm['TWVega'] = firm['TWVega'].shift(1)
+    firm['TWVega'].fillna(0, inplace=True) 
+    firm = firm.merge(spy, on=['TradeDate'], how='left')
+    firm['ROV'] = (firm['Gamma_C'] + firm['Theta_C_New']) / firm['TWVega']
+    
+    return leaps, cvx, catalyst, s1, s2, l1, l2, firm
 
+def connect_to_sql(host, usr, pwd, db):
+    conn_str = 'mssql+pymssql://%s:%s@%s/%s' % (usr, pwd, host, db)
+    engine = create_engine(conn_str, pool_size=5, pool_recycle=10)
+    return engine
 
+    
 def convert(s):
     s.refresh()
     frame = s.make_dataframe()
@@ -242,9 +304,7 @@ def convert(s):
 
     
 def grab_gamma():
-    #grabs the franchise number from sql 
-    connstr = 'DRIVER={SQL Server Native Client 11.0}; SERVER=sql3; Database=master; Trusted_Connection=yes'
-    connection = pyodbc.connect(connstr)
+    engine = connect_to_sql('SQL3', sql1_user, sql1_pwd, 'positions')
     
     query = """
       SELECT t.name,p.traderID, sum(impliedGammaC) + sum(thetaCNew) 'Franchise'
@@ -254,7 +314,7 @@ def grab_gamma():
       and t.Trader = 1
       group by t.name,  p.traderID
     """
-    frame = psql.read_sql(query, connection)[['name', 'traderID', 'Franchise']]
+    frame = psql.read_sql(query, engine)[['name', 'traderID', 'Franchise']]
     frame.rename(columns = {'name': 'name',
                             'traderID': 'traderID',
                             'Franchise': 'franchise'}, inplace=True)
@@ -264,11 +324,17 @@ def grab_gamma():
     
     franchise = frame['franchise'].values
     group_names = frame['name'].values
+    totalFSum = 0
+    accounts = ['Sector Group 1', 'Liquid', 'Sector Group 2', 'LEAPs', 'Catalyst', 'Illiquid', 'Convexity']
+    
     dict_franchise = {}
     for i in range(len(franchise)):
         dict_franchise[group_names[i]] = float(franchise[i])
-        
-    return dict_franchise
+        if group_names[i] in accounts:
+            totalFSum += dict_franchise[group_names[i]]
+    print 'This is the total firm franchise'
+    print totalFSum
+    return dict_franchise, totalFSum
     
 
 def grab_spy_today():
@@ -281,14 +347,12 @@ def grab_spy_today():
     change = (float(frame['StockLast'][0]) - float(frame['StockOpen'][0])) / frame['StockOpen'][0]
     s.channel.close()
     ps.close() 
-    print 'grabbed spy' 
     return change
 
-
-def grab_vega():
-    connstr = 'DRIVER={SQL Server Native Client 11.0}; SERVER=pvwchi6psql1; Database=master; Trusted_Connection=yes'
-    connection = pyodbc.connect(connstr)
     
+def grab_vega():
+    engine = connect_to_sql(sql1_host, sql1_user, sql1_pwd, db)
+
     query = """
     with stockVega as (
     SELECT lastupdated, (CASE WHEN CHARINDEX('/', underlyingSymbol) = 0 
@@ -307,7 +371,7 @@ def grab_vega():
     group by s.lastUpdated, s.account, x.tday
     order by lastupdated desc 
     """
-    frame = psql.read_sql(query, connection)[['lastUpdated', 'account', 'AbsGroupVega', 'tday']]
+    frame = psql.read_sql(query, engine) #[['lastUpdated', 'account', 'AbsGroupVega', 'tday']]
     frame.rename(columns = {'lastUpdated' : 'LastUpdated',
                             'account': 'Group',
                             'AbsGroupVega' : 'AdjVega',
@@ -318,11 +382,13 @@ def grab_vega():
     
     names_vega = frame['Group'].values
     vega_vals = frame['AdjVega'].values
+    totalSum = vega_vals.sum()
+    print 'this is the total vega sum for today'
+    print totalSum
     dict_vega = {}
     for i in range(len(names_vega)):
         dict_vega[names_vega[i]] = float(vega_vals[i])
-        
-    return dict_vega
+    return dict_vega, totalSum
 
 
 def grab_group(group, s, franchise, vega, data, fig_num=None):
@@ -330,6 +396,8 @@ def grab_group(group, s, franchise, vega, data, fig_num=None):
         raise NameError('Missing arguments, recheck that you have all inputs')
 
     if franchise is None or (type(franchise) is not int and type(franchise) is not float):
+        print 'This is your invalid franchise number'
+        print franchise 
         raise NameError('Please enter in valid franchise number')
     elif vega is None or (type(vega) is not int and type(vega) is not float):
         raise NameError('Please enter in valid vega number')
@@ -355,13 +423,12 @@ def grab_group(group, s, franchise, vega, data, fig_num=None):
         m = k(data['ROV'].values.T.tolist(), data['Ret'].values.T.tolist(), .15, s, franchise, vega, group) 
     elif name == 'ILLIQUID':
         m = k(data['ROV'].values.T.tolist(), data['Ret'].values.T.tolist(), .2, s, franchise, vega, group) 
+    elif name == 'FIRM':
+        m = k(data['ROV'].values.T.tolist(), data['Ret'].values.T.tolist(), .07, s, franchise, vega, group) 
     else:
         raise NameError('Please enter in one of the following: \
-            leaps, convexity, catalyst, sector 1, sector 2, liquid, or illiquid as group names')
-            
-    #Grab probability density function plotting of group 
-#    plt.figure(fig_num).suptitle(name, fontsize=12, fontweight='bold')
-#    plt.plot(x, y, color='k', linewidth=1.0)
+            leaps, convexity, catalyst, sector 1, sector 2, liquid, illiquid, or firm as group names')            
+
     return err + m
         
 def email(subject, body, receivers=None, path=None):
@@ -373,8 +440,7 @@ def email(subject, body, receivers=None, path=None):
     if receivers is not None:
         to_email = receivers
     else:
-        to_email = ['jguo@peak6.com'] #, 'aflores@peak6.com', 'slin@peak6.com', 'pshively@peak6.com']
-        # to_email = ['slin@peak6.com']
+        to_email = ['jguo@peak6.com', 'aflores@peak6.com', 'slin@peak6.com', 'pshively@peak6.com', 'riskcapman@peak6.com']
     msg['Subject'] = subject
 
     content = MIMEText(body, 'plain')
@@ -392,12 +458,12 @@ def email(subject, body, receivers=None, path=None):
         
 if __name__ == '__main__':
     message = '' 
-    vegas = grab_vega() 
-    gammas = grab_gamma()
-    
-    spy_move = grab_spy_today()
-    lp, cvx, cat, s1, s2, l1, l2 = pull_data() 
+    vegas, firmVega = grab_vega() 
+    gammas, firmGamma = grab_gamma()
 
+    spy_move = grab_spy_today()
+    
+    lp, cvx, cat, s1, s2, l1, l2, firmTotal = pull_data() 
 #==============================================================================
 #      Format for inputting in the data: 
 #      name of group  -UNCHANGED
@@ -407,6 +473,9 @@ if __name__ == '__main__':
 #      data array: one of the elemnts in {leaps, cvx, cat, s1, s2, l1, l2 } - UNCHANGED
 #      figure number: try to keep it in sequential integers - UNCHANGED
 #==============================================================================
+       
+    #getting trader groups and then firm franchise information  
+    #
     
     #leaps
     message += grab_group('Leaps', spy_move, gammas['LEAPs'], vegas['LPS'], lp, 1) 
@@ -425,9 +494,9 @@ if __name__ == '__main__':
  
     #Liquidity 
     message += grab_group('Liquid', spy_move, gammas['Liquid'], vegas['LIQ'], l1, 6)
-
+    
     #illiquidty 
     message += grab_group('Illiquid', spy_move, gammas['Illiquid'], vegas['ILQ'], l2, 7)
-#    
+
+    message += grab_group('Firm', spy_move, float(firmGamma), float(firmVega), firmTotal, 8)
     email('Trading Franchise Distribution For %s' % (str(datetime.date.today())), message)
-#    
