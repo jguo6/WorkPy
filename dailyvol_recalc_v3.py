@@ -129,7 +129,7 @@ def DM_vol_w(series):
     
 def calc_log_vols(ser):
     stk = ser.values
-    
+    #
     period = [20, 40, 60, 125, 250] 
     daily = []
     weekly = []
